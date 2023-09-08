@@ -11,7 +11,7 @@ import time
 import wfdb as wf
 import os
 from wfdb.processing import resample_sig
-from utils.reprocessing import butter_bandpass_filter, smooth, bwr
+from utils.reprocessing import butter_bandpass_filter, smooth, bwr, butter_highpass_filter
 
 from scipy.signal import welch, spectrogram
 from scipy.fft import fftshift
@@ -26,7 +26,7 @@ from PyEMD import EEMD, CEEMDAN, EMD
 
 fs = 250
 
-file = '119'
+file = '118'
 ext_noise = 'e06'
 
 mitdb_path = '/mnt/Dataset/ECG/PhysionetData/nstdb/'
@@ -46,6 +46,23 @@ def std_imf(imf, factor=3):
     imf[np.abs(imf) < (factor * sigma)] = 0
     # imf[imf < (sigma / 3)] = 0
     return imf
+
+
+def rm_imf(imf, factor=3):
+    imf_bk = imf.copy()
+    while True:
+        sigma = np.std(imf)
+        tmp_mean_imf = np.mean(imf)
+        tmp_imf = imf - tmp_mean_imf
+        indx = np.flatnonzero(tmp_imf < (factor * sigma))
+        if len(indx) > 0:
+            imf_bk[indx] = 0
+            imf = np.delete(imf, indx)
+        else:
+            break
+
+    return imf_bk
+
 
 def main():
     data_raw = wf.rdsamp(os.path.join(_mitdb_path, _file_name))[0][:, 0]
@@ -96,14 +113,29 @@ def main():
 
     denominator = 2
     _E_IMFs = E_IMFs.copy()
+    sigma = []
+    sigma_hat = []
     for i in range((E_IMFs.shape[0])):
-        if i < 4: # or i > 5:
-            E_IMFs[i] = std_imf(E_IMFs[i], 2)
-        else:
-            E_IMFs[i] = std_imf(E_IMFs[i], 1.5)
-        #     break
+        #1) Calculate the standard deviation of an IMF
+        tmp_sigma = np.std(E_IMFs[i])
+        sigma.append(tmp_sigma)
+        #2) Estimate the standard deviation of noise in the corresponding IMF
+        tmp_mean = np.mean(E_IMFs[i])
+        sigma_hat.append(np.median(np.abs(E_IMFs[i] - tmp_mean)) / 0.6745)
 
-    E_IMFs[-1] = bwr(E_IMFs[-1], fs)
+    sigma = np.asarray(sigma)
+    sigma_hat = np.asarray(sigma_hat)
+    #3) Estimate the boundary of noise dominating IMF
+    kb = (np.argmax(np.divide(sigma, sigma_hat)) + np.argmax(np.subtract(sigma, sigma_hat))) // 2
+
+    for i in range((E_IMFs.shape[0])) :
+        if i <= kb:
+            E_IMFs[i] = std_imf(E_IMFs[i], 3)
+        else:
+            # E_IMFs[i] = bwr(E_IMFs[i], fs)
+            E_IMFs[i] = butter_highpass_filter(E_IMFs[i], 1, fs)
+
+    # E_IMFs[-1] = bwr(E_IMFs[-1], fs)
 
     plt.figure(num=1)
     sub_num = ((E_IMFs.shape[0]//denominator + 1) * 100 + 11)
@@ -114,6 +146,7 @@ def main():
         # print(i)
         plt.subplot(sub_num + i + 1, sharex=ax1)
         plt.plot(E_IMFs[i])
+        plt.plot(x)
         plt.title('IMF-{}'.format(i + 1))
 
     plt.figure(num=2)
@@ -132,10 +165,18 @@ def main():
     for i in range(E_IMFs.shape[0] - 1) :
         reconstruction += E_IMFs[i]
 
-    plt.plot(butter_bandpass_filter(reconstruction, 0.5, 40, fs), color='r', label='re')
-    plt.plot(butter_bandpass_filter(x, 0.5, 40, fs), color='g', label='raw')
+    reconstruction_bp = butter_bandpass_filter(reconstruction, 0.5, 40, fs)
+    x_bp = butter_bandpass_filter(x, 0.5, 40, fs)
+    _x_bp = butter_bandpass_filter(_x, 0.5, 40, fs)
 
-    plt.plot(smooth(bwr(reconstruction, fs)), color='k', label='re')
+    # plt.plot(reconstruction_bp, color='r', label='re')
+    plt.plot(x_bp, color='g', label='raw_NSTDB_bp')
+    plt.plot(_x_bp, color='m', label='raw_MITDB_bp')
+    plt.plot(np.multiply(x_bp, np.abs(reconstruction_bp)), color='b', label='New')
+    # plt.plot(np.add(x_bp, np.abs(reconstruction_bp)), color='b', label='ext')
+    plt.legend()
+
+    # plt.plot(smooth(bwr(reconstruction, fs)), color='k', label='re')
     # plt.plot(bwr(x, fs), color='g', label='raw')
 
     plt.show()
